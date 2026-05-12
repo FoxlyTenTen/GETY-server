@@ -11,6 +11,7 @@ import io
 import config
 from ingest import process_file
 from agent import query_rag
+from rag_structured import get_disease_info, generate_milestones
 
 # ── TFLite model setup ────────────────────────────────────────────
 _MODEL_PATH = Path(__file__).parent.parent / "model" / "best_float32.tflite"
@@ -72,6 +73,8 @@ def process_file_endpoint(body: ProcessFileRequest):
     try:
         return process_file(body.file_id)
     except Exception as err:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(err))
 
 
@@ -82,6 +85,35 @@ def query_endpoint(body: QueryRequest):
             body.question,
             [msg.model_dump() for msg in body.chat_history],
         )
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err))
+
+
+class DiseaseInfoRequest(BaseModel):
+    disease_class: str = Field(..., min_length=1)
+
+
+class MilestonesRequest(BaseModel):
+    disease_class: str = Field(..., min_length=1)
+    recovery_days: float = Field(..., gt=0)  # accept float, rag_structured casts to int
+
+
+@app.post("/disease-info")
+def disease_info_endpoint(body: DiseaseInfoRequest):
+    if body.disease_class == "Healthy":
+        raise HTTPException(status_code=400, detail="No disease info for Healthy class.")
+    try:
+        return get_disease_info(body.disease_class)
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err))
+
+
+@app.post("/generate-milestones")
+def generate_milestones_endpoint(body: MilestonesRequest):
+    if body.disease_class == "Healthy":
+        raise HTTPException(status_code=400, detail="No milestones for Healthy class.")
+    try:
+        return generate_milestones(body.disease_class, int(body.recovery_days))
     except Exception as err:
         raise HTTPException(status_code=500, detail=str(err))
 

@@ -5,34 +5,84 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from supabase_client import get_vector_store
+from supabase_client import get_vector_store, hybrid_search
 
 
-SYSTEM_PROMPT = """You are GETY's AI assistant for rubber tree (Hevea brasiliensis) leaf disease management.
+SYSTEM_PROMPT = """You are GETY's AI assistant for rubber tree (Hevea brasiliensis) disease management.
 
-For any question about rubber tree diseases, treatments, symptoms, or farm management, you MUST call the `retrieve` tool first to search the knowledge base. Base your answer ONLY on what the tool returns.
+LANGUAGE RULE:
+- Always reply in the same language the user wrote in.
+- If the user writes in Malay, reply in Malay. If English, reply in English.
 
-If the retrieved context does not contain enough information to answer, say so honestly. Never fabricate facts.
+DISEASE ACCURACY RULE:
+- Only answer about the exact disease the user asked about. Never mix diseases.
+- If chunks mention multiple diseases, use only the relevant ones.
 
-Formatting rules — follow these strictly:
-- Write in clean, practical prose.
-- Use short paragraphs. Use markdown bullet lists only when listing 3 or more distinct items.
-- Use **bold** sparingly for key terms (disease names, chemicals, actions).
-- Do NOT include inline source citations like "(filename.pdf, chunk 12)" — source documents are displayed separately to the user as chips, so inline citations are redundant and clutter the answer.
-- Do NOT mention chunk numbers, document filenames, or say "according to the document".
-- Keep answers focused and concise — no preamble, no repetition."""
+For any question about rubber tree diseases, call the `retrieve` tool first. Base your answer ONLY on what it returns.
+
+ANSWER LENGTH RULE:
+- Match the answer length to the question complexity.
+- Simple question (e.g. "what causes Oidium?") → 2-4 sentences max.
+- Specific question (e.g. "what fungicide and dosage for Corynespora?") → include the key facts only: fungicide name, rate, interval.
+- Only give a full detailed answer if the user explicitly asks for complete information.
+- Never dump everything from the chunks — pick only what directly answers the question.
+
+PREVENTION RULE:
+- If asked about prevention and no explicit prevention section exists, use fungicide schedule and spray intervals as the answer — proactive application IS prevention for rubber tree diseases.
+
+Formatting:
+- Use bullet points only when listing 3 or more items.
+- **Bold** key terms: disease names, chemical names.
+- No preamble, no repetition, no filler sentences."""
+
+
+# ── Disease keyword → canonical name map (used for targeted retrieval) ───────
+_DISEASE_QUERY_MAP = {
+    'oidium':           'Oidium heveae powdery mildew luruhan daun sekunder',
+    'powdery mildew':   'Oidium heveae powdery mildew luruhan daun sekunder',
+    'colletotrichum':   'Colletotrichum gloeosporioides luruhan daun sekunder',
+    'anthracnose':      'Colletotrichum gloeosporioides luruhan daun sekunder',
+    'corynespora':      'Corynespora cassiicola luruhan daun sekunder tulang ikan',
+    'fusicoccum':       'Fusicoccum leaf blight luruhan daun fusicoccum',
+    'leaf blight':      'Fusicoccum leaf blight luruhan daun fusicoccum',
+    'phytophthora':     'Phytophthora palmivora abnormal leaf fall',
+    'bird eye':         'Bird eye spot bipolaris heveae rintik mata burung',
+    'bird\'s eye':      'Bird eye spot bipolaris heveae rintik mata burung',
+    'pink disease':     'Pink disease corticium salmonicolor cendawan angin',
+    'black stripe':     'Black stripe calar hitam phytophthora botryosa',
+    'white root':       'White root disease rigidoporus akar putih',
+    'red root':         'Red root disease ganoderma akar merah',
+    'brown root':       'Brown root disease phellinus akar perang',
+}
+
+
+def _get_disease_query(question: str) -> str | None:
+    """Return a targeted retrieval query if a disease name is detected."""
+    q = question.lower()
+    for keyword, search_query in _DISEASE_QUERY_MAP.items():
+        if keyword in q:
+            return search_query
+    return None
 
 
 @tool
 def retrieve(query: str) -> str:
-    """Search the GETY knowledge base for information relevant to the query."""
-    vector_store = get_vector_store()
-    docs = vector_store.similarity_search(query, k=5)
+    """Search the GETY rubber tree disease knowledge base. Always call this before answering."""
+    try:
+        targeted_query = _get_disease_query(query)
+        search_query = targeted_query if targeted_query else query
+        docs = hybrid_search(search_query, k=15)
+    except Exception:
+        # Fallback to plain vector search if hybrid fails
+        docs = get_vector_store().similarity_search(query, k=15)
+
     if not docs:
         return "No relevant documents found."
+
     return "\n\n---\n\n".join(
         f"[Source: {doc.metadata.get('filename', 'unknown')}, "
-        f"chunk {doc.metadata.get('chunk_index', '?')}]\n{doc.page_content}"
+        f"chunk {doc.metadata.get('chunk_index', '?')}]\n"
+        f"{doc.page_content}"
         for doc in docs
     )
 
@@ -43,7 +93,7 @@ _agent = None
 def _get_agent():
     global _agent
     if _agent is None:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
         _agent = create_agent(
             model=llm,
             tools=[retrieve],
